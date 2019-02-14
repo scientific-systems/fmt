@@ -56,8 +56,8 @@ template <typename Char> struct test_stream : std::basic_ostream<Char> {
 template <typename T, typename Char> class is_streamable {
  private:
   template <typename U>
-  static decltype(internal::declval<test_stream<Char>&>()
-                      << internal::declval<U>(),
+  static decltype((void)(internal::declval<test_stream<Char>&>()
+                         << internal::declval<U>()),
                   std::true_type())
   test(int);
 
@@ -138,8 +138,8 @@ template <typename S, typename... Args>
 inline typename std::enable_if<internal::is_string<S>::value>::type print(
     std::basic_ostream<FMT_CHAR(S)>& os, const S& format_str,
     const Args&... args) {
-  internal::checked_args<S, Args...> ca(format_str, args...);
-  vprint(os, to_string_view(format_str), *ca);
+  vprint(os, to_string_view(format_str),
+         {internal::make_args_checked(format_str, args...)});
 }
 FMT_END_NAMESPACE
 

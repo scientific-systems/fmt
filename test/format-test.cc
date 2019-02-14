@@ -1927,7 +1927,8 @@ class mock_arg_formatter
   typedef fmt::internal::arg_formatter_base<buffer_range> base;
   typedef buffer_range range;
 
-  mock_arg_formatter(fmt::format_context& ctx, fmt::format_specs* s = FMT_NULL)
+  mock_arg_formatter(fmt::format_context& ctx, fmt::format_parse_context*,
+                     fmt::format_specs* s = FMT_NULL)
       : base(fmt::internal::get_container(ctx.out()), s, ctx.locale()) {
     EXPECT_CALL(*this, call(42));
   }
@@ -2164,6 +2165,18 @@ TEST(FormatTest, ConstexprParseFormatSpecs) {
   static_assert(parse_test_specs("{<").res == handler::ERROR, "");
 }
 
+struct test_parse_context {
+  typedef char char_type;
+
+  FMT_CONSTEXPR unsigned next_arg_id() { return 11; }
+  template <typename Id> FMT_CONSTEXPR void check_arg_id(Id) {}
+
+  FMT_CONSTEXPR const char* begin() { return FMT_NULL; }
+  FMT_CONSTEXPR const char* end() { return FMT_NULL; }
+
+  void on_error(const char*) {}
+};
+
 struct test_context {
   typedef char char_type;
   typedef fmt::basic_format_arg<test_context> format_arg;
@@ -2172,32 +2185,23 @@ struct test_context {
     typedef fmt::formatter<T, char_type> type;
   };
 
-  FMT_CONSTEXPR fmt::basic_format_arg<test_context> next_arg() {
-    return fmt::internal::make_arg<test_context>(11);
-  }
-
   template <typename Id>
-  FMT_CONSTEXPR fmt::basic_format_arg<test_context> arg(Id) {
-    return fmt::internal::make_arg<test_context>(22);
+  FMT_CONSTEXPR fmt::basic_format_arg<test_context> arg(Id id) {
+    return fmt::internal::make_arg<test_context>(id);
   }
-
-  template <typename Id> FMT_CONSTEXPR void check_arg_id(Id) {}
-
-  FMT_CONSTEXPR unsigned next_arg_id() { return 33; }
 
   void on_error(const char*) {}
 
-  FMT_CONSTEXPR test_context& parse_context() { return *this; }
   FMT_CONSTEXPR test_context error_handler() { return *this; }
-  FMT_CONSTEXPR const char* begin() { return FMT_NULL; }
-  FMT_CONSTEXPR const char* end() { return FMT_NULL; }
 };
 
 template <size_t N>
 FMT_CONSTEXPR fmt::format_specs parse_specs(const char (&s)[N]) {
   fmt::format_specs specs;
+  test_parse_context parse_ctx;
   test_context ctx{};
-  fmt::internal::specs_handler<test_context> h(specs, ctx);
+  fmt::internal::specs_handler<test_parse_context, test_context> h(
+      specs, parse_ctx, ctx);
   parse_format_specs(s, s + N, h);
   return specs;
 }
@@ -2212,10 +2216,10 @@ TEST(FormatTest, ConstexprSpecsHandler) {
   static_assert(parse_specs("0").align() == fmt::ALIGN_NUMERIC, "");
   static_assert(parse_specs("42").width() == 42, "");
   static_assert(parse_specs("{}").width() == 11, "");
-  static_assert(parse_specs("{0}").width() == 22, "");
+  static_assert(parse_specs("{22}").width() == 22, "");
   static_assert(parse_specs(".42").precision == 42, "");
   static_assert(parse_specs(".{}").precision == 11, "");
-  static_assert(parse_specs(".{0}").precision == 22, "");
+  static_assert(parse_specs(".{22}").precision == 22, "");
   static_assert(parse_specs("d").type == 'd', "");
 }
 
@@ -2223,8 +2227,8 @@ template <size_t N>
 FMT_CONSTEXPR fmt::internal::dynamic_format_specs<char> parse_dynamic_specs(
     const char (&s)[N]) {
   fmt::internal::dynamic_format_specs<char> specs;
-  test_context ctx{};
-  fmt::internal::dynamic_specs_handler<test_context> h(specs, ctx);
+  test_parse_context ctx{};
+  fmt::internal::dynamic_specs_handler<test_parse_context> h(specs, ctx);
   parse_format_specs(s, s + N, h);
   return specs;
 }
@@ -2238,10 +2242,10 @@ TEST(FormatTest, ConstexprDynamicSpecsHandler) {
   static_assert(parse_dynamic_specs("#").has(fmt::HASH_FLAG), "");
   static_assert(parse_dynamic_specs("0").align() == fmt::ALIGN_NUMERIC, "");
   static_assert(parse_dynamic_specs("42").width() == 42, "");
-  static_assert(parse_dynamic_specs("{}").width_ref.val.index == 33, "");
+  static_assert(parse_dynamic_specs("{}").width_ref.val.index == 11, "");
   static_assert(parse_dynamic_specs("{42}").width_ref.val.index == 42, "");
   static_assert(parse_dynamic_specs(".42").precision == 42, "");
-  static_assert(parse_dynamic_specs(".{}").precision_ref.val.index == 33, "");
+  static_assert(parse_dynamic_specs(".{}").precision_ref.val.index == 11, "");
   static_assert(parse_dynamic_specs(".{42}").precision_ref.val.index == 42, "");
   static_assert(parse_dynamic_specs("d").type == 'd', "");
 }

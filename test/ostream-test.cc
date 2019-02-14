@@ -26,6 +26,11 @@ static std::wostream& operator<<(std::wostream& os, const Date& d) {
   return os;
 }
 
+// Make sure that overloaded comma operators do no harm to is_streamable.
+struct type_with_comma_op {};
+template <typename T> void operator,(type_with_comma_op, const T&);
+template <typename T> type_with_comma_op operator<<(T&, const Date&);
+
 enum TestEnum {};
 static std::ostream& operator<<(std::ostream& os, TestEnum) {
   return os << "TestEnum";
@@ -49,14 +54,15 @@ TEST(OStreamTest, Enum) {
 typedef fmt::back_insert_range<fmt::internal::buffer> range;
 
 struct test_arg_formatter : fmt::arg_formatter<range> {
+  fmt::format_parse_context parse_ctx;
   test_arg_formatter(fmt::format_context& ctx, fmt::format_specs& s)
-      : fmt::arg_formatter<range>(ctx, &s) {}
+      : fmt::arg_formatter<range>(ctx, &parse_ctx, &s), parse_ctx("") {}
 };
 
 TEST(OStreamTest, CustomArg) {
   fmt::memory_buffer buffer;
   fmt::internal::buffer& base = buffer;
-  fmt::format_context ctx(std::back_inserter(base), "", fmt::format_args());
+  fmt::format_context ctx(std::back_inserter(base), fmt::format_args());
   fmt::format_specs spec;
   test_arg_formatter af(ctx, spec);
   fmt::visit_format_arg(

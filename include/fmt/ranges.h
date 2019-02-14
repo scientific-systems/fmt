@@ -76,7 +76,7 @@ template <typename OutputIterator> void copy(char ch, OutputIterator out) {
 template <typename T> class is_like_std_string {
   template <typename U>
   static auto check(U* p)
-      -> decltype(p->find('a'), p->length(), p->data(), int());
+      -> decltype((void)p->find('a'), p->length(), (void)p->data(), int());
   template <typename> static void check(...);
 
  public:
@@ -104,10 +104,10 @@ struct is_range_<
 /// tuple_size and tuple_element check.
 template <typename T> class is_tuple_like_ {
   template <typename U>
-  static auto check(U* p)
-      -> decltype(std::tuple_size<U>::value,
-                  internal::declval<typename std::tuple_element<0, U>::type>(),
-                  int());
+  static auto check(U* p) -> decltype(
+      std::tuple_size<U>::value,
+      (void)internal::declval<typename std::tuple_element<0, U>::type>(),
+      int());
   template <typename> static void check(...);
 
  public:

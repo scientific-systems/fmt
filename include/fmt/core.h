@@ -153,7 +153,7 @@
 #    elif FMT_MSC_VER
 #      define FMT_DEPRECATED __declspec(deprecated)
 #    else
-#      define FMT_DEPRECATED /*deprecated*/
+#      define FMT_DEPRECATED /* deprecated */
 #    endif
 #  endif
 #endif
@@ -208,6 +208,8 @@
 #  include <functional>
 #endif
 
+#define FMT_ENABLE_IF_T(...) typename std::enable_if<__VA_ARGS__>::type
+
 FMT_BEGIN_NAMESPACE
 namespace internal {
 
@@ -226,7 +228,7 @@ struct result_of<F(Args...)> : std::invoke_result<F, Args...> {};
 // A workaround for gcc 4.4 that doesn't allow F to be a reference.
 template <typename F, typename... Args>
 struct result_of<F(Args...)>
-  : std::result_of<typename std::remove_reference<F>::type(Args...)> {};
+    : std::result_of<typename std::remove_reference<F>::type(Args...)> {};
 #endif
 
 // Casts nonnegative integer to unsigned.
@@ -511,12 +513,69 @@ struct compile_string {};
 template <typename S>
 struct is_compile_string : std::is_base_of<compile_string, S> {};
 
-template <typename S, typename Enable = typename std::enable_if<
-                          is_compile_string<S>::value>::type>
+template <typename S,
+          typename Enable = FMT_ENABLE_IF_T(is_compile_string<S>::value)>
 FMT_CONSTEXPR basic_string_view<typename S::char_type> to_string_view(
     const S& s) {
   return s;
 }
+
+// Parsing context consisting of a format string range being parsed and an
+// argument counter for automatic indexing.
+template <typename Char, typename ErrorHandler = internal::error_handler>
+class basic_parse_context : private ErrorHandler {
+ private:
+  basic_string_view<Char> format_str_;
+  int next_arg_id_;
+
+ public:
+  typedef Char char_type;
+  typedef typename basic_string_view<Char>::iterator iterator;
+
+  explicit FMT_CONSTEXPR basic_parse_context(basic_string_view<Char> format_str,
+                                             ErrorHandler eh = ErrorHandler())
+      : ErrorHandler(eh), format_str_(format_str), next_arg_id_(0) {}
+
+  // Returns an iterator to the beginning of the format string range being
+  // parsed.
+  FMT_CONSTEXPR iterator begin() const FMT_NOEXCEPT {
+    return format_str_.begin();
+  }
+
+  // Returns an iterator past the end of the format string range being parsed.
+  FMT_CONSTEXPR iterator end() const FMT_NOEXCEPT { return format_str_.end(); }
+
+  // Advances the begin iterator to ``it``.
+  FMT_CONSTEXPR void advance_to(iterator it) {
+    format_str_.remove_prefix(internal::to_unsigned(it - begin()));
+  }
+
+  // Returns the next argument index.
+  FMT_CONSTEXPR unsigned next_arg_id();
+
+  FMT_CONSTEXPR bool check_arg_id(unsigned) {
+    if (next_arg_id_ > 0) {
+      on_error("cannot switch from automatic to manual argument indexing");
+      return false;
+    }
+    next_arg_id_ = -1;
+    return true;
+  }
+
+  FMT_CONSTEXPR void check_arg_id(basic_string_view<Char>) {}
+
+  FMT_CONSTEXPR void on_error(const char* message) {
+    ErrorHandler::on_error(message);
+  }
+
+  FMT_CONSTEXPR ErrorHandler error_handler() const { return *this; }
+};
+
+typedef basic_parse_context<char> format_parse_context;
+typedef basic_parse_context<wchar_t> wformat_parse_context;
+
+FMT_DEPRECATED typedef basic_parse_context<char> parse_context;
+FMT_DEPRECATED typedef basic_parse_context<wchar_t> wparse_context;
 
 template <typename Context> class basic_format_arg;
 template <typename Context> class basic_format_args;
@@ -605,7 +664,9 @@ template <typename Char> struct string_value {
 
 template <typename Context> struct custom_value {
   const void* value;
-  void (*format)(const void* arg, Context& ctx);
+  void (*format)(const void* arg,
+                 basic_parse_context<typename Context::char_type>& parse_ctx,
+                 Context& ctx);
 };
 
 // A formatting argument value.
@@ -628,7 +689,7 @@ template <typename Context> class value {
   };
 
   FMT_CONSTEXPR value(int val = 0) : int_value(val) {}
-  value(unsigned val) { uint_value = val; }
+  FMT_CONSTEXPR value(unsigned val) : uint_value(val) {}
   value(long long val) { long_long_value = val; }
   value(unsigned long long val) { ulong_long_value = val; }
   value(double val) { double_value = val; }
@@ -673,9 +734,10 @@ template <typename Context> class value {
  private:
   // Formats an argument of a custom type, such as a user-defined class.
   template <typename T, typename Formatter>
-  static void format_custom_arg(const void* arg, Context& ctx) {
+  static void format_custom_arg(const void* arg,
+                                basic_parse_context<char_type>& parse_ctx,
+                                Context& ctx) {
     Formatter f;
-    auto&& parse_ctx = ctx.parse_context();
     parse_ctx.advance_to(f.parse(parse_ctx));
     ctx.advance_to(f.format(*static_cast<const T*>(arg), ctx));
   }
@@ -730,18 +792,14 @@ FMT_MAKE_VALUE(uint_type, unsigned char, unsigned)
 
 // This doesn't use FMT_MAKE_VALUE because of ambiguity in gcc 4.4.
 template <typename C, typename Char>
-FMT_CONSTEXPR
-    typename std::enable_if<std::is_same<typename C::char_type, Char>::value,
-                            init<C, int, char_type>>::type
-    make_value(Char val) {
+FMT_CONSTEXPR FMT_ENABLE_IF_T(std::is_same<typename C::char_type, Char>::value,
+                              init<C, int, char_type>) make_value(Char val) {
   return val;
 }
 
 template <typename C>
-FMT_CONSTEXPR
-    typename std::enable_if<!std::is_same<typename C::char_type, char>::value,
-                            init<C, int, char_type>>::type
-    make_value(char val) {
+FMT_CONSTEXPR FMT_ENABLE_IF_T(!std::is_same<typename C::char_type, char>::value,
+                              init<C, int, char_type>) make_value(char val) {
   return val;
 }
 
@@ -778,39 +836,35 @@ FMT_MAKE_VALUE(pointer_type, std::nullptr_t, const void*)
 // formatting of "[const] volatile char *" which is printed as bool by
 // iostreams.
 template <typename C, typename T>
-typename std::enable_if<!std::is_same<T, typename C::char_type>::value>::type
+FMT_ENABLE_IF_T(!std::is_same<T, typename C::char_type>::value)
 make_value(const T*) {
   static_assert(!sizeof(T), "formatting of non-void pointers is disallowed");
 }
 
 template <typename C, typename T>
-inline
-    typename std::enable_if<std::is_enum<T>::value &&
-                                convert_to_int<T, typename C::char_type>::value,
-                            init<C, int, int_type>>::type
-    make_value(const T& val) {
+inline FMT_ENABLE_IF_T(
+    std::is_enum<T>::value&& convert_to_int<T, typename C::char_type>::value,
+    init<C, int, int_type>) make_value(const T& val) {
   return static_cast<int>(val);
 }
 
 template <typename C, typename T, typename Char = typename C::char_type>
-inline typename std::enable_if<
-    is_constructible<basic_string_view<Char>, T>::value &&
-        !internal::is_string<T>::value,
-    init<C, basic_string_view<Char>, string_type>>::type
-make_value(const T& val) {
+inline FMT_ENABLE_IF_T(is_constructible<basic_string_view<Char>, T>::value &&
+                           !internal::is_string<T>::value,
+                       init<C, basic_string_view<Char>, string_type>)
+    make_value(const T& val) {
   return basic_string_view<Char>(val);
 }
 
 template <typename C, typename T, typename Char = typename C::char_type>
-inline typename std::enable_if<
+inline FMT_ENABLE_IF_T(
     !convert_to_int<T, Char>::value && !std::is_same<T, Char>::value &&
         !std::is_convertible<T, basic_string_view<Char>>::value &&
         !is_constructible<basic_string_view<Char>, T>::value &&
         !internal::is_string<T>::value,
     // Implicit conversion to std::string is not handled here because it's
     // unsafe: https://github.com/fmtlib/fmt/issues/729
-    init<C, const T&, custom_type>>::type
-make_value(const T& val) {
+    init<C, const T&, custom_type>) make_value(const T& val) {
   return val;
 }
 
@@ -823,10 +877,10 @@ init<C, const void*, named_arg_type> make_value(
 }
 
 template <typename C, typename S>
-FMT_CONSTEXPR11 typename std::enable_if<
+FMT_CONSTEXPR11 FMT_ENABLE_IF_T(
     internal::is_string<S>::value,
-    init<C, basic_string_view<typename C::char_type>, string_type>>::type
-make_value(const S& val) {
+    init<C, basic_string_view<typename C::char_type>, string_type>)
+    make_value(const S& val) {
   // Handle adapted strings.
   static_assert(std::is_same<typename C::char_type,
                              typename internal::char_t<S>::type>::value,
@@ -866,7 +920,9 @@ template <typename Context> class basic_format_arg {
    public:
     explicit handle(internal::custom_value<Context> custom) : custom_(custom) {}
 
-    void format(Context& ctx) const { custom_.format(custom_.value, ctx); }
+    void format(basic_parse_context<char_type>& parse_ctx, Context& ctx) const {
+      custom_.format(custom_.value, parse_ctx, ctx);
+    }
 
    private:
     internal::custom_value<Context> custom_;
@@ -874,7 +930,7 @@ template <typename Context> class basic_format_arg {
 
   FMT_CONSTEXPR basic_format_arg() : type_(internal::none_type) {}
 
-  FMT_EXPLICIT operator bool() const FMT_NOEXCEPT {
+  FMT_CONSTEXPR FMT_EXPLICIT operator bool() const FMT_NOEXCEPT {
     return type_ != internal::none_type;
   }
 
@@ -938,63 +994,6 @@ visit(Visitor&& vis, const basic_format_arg<Context>& arg) {
   return visit_format_arg(std::forward<Visitor>(vis), arg);
 }
 
-// Parsing context consisting of a format string range being parsed and an
-// argument counter for automatic indexing.
-template <typename Char, typename ErrorHandler = internal::error_handler>
-class basic_parse_context : private ErrorHandler {
- private:
-  basic_string_view<Char> format_str_;
-  int next_arg_id_;
-
- public:
-  typedef Char char_type;
-  typedef typename basic_string_view<Char>::iterator iterator;
-
-  explicit FMT_CONSTEXPR basic_parse_context(basic_string_view<Char> format_str,
-                                             ErrorHandler eh = ErrorHandler())
-      : ErrorHandler(eh), format_str_(format_str), next_arg_id_(0) {}
-
-  // Returns an iterator to the beginning of the format string range being
-  // parsed.
-  FMT_CONSTEXPR iterator begin() const FMT_NOEXCEPT {
-    return format_str_.begin();
-  }
-
-  // Returns an iterator past the end of the format string range being parsed.
-  FMT_CONSTEXPR iterator end() const FMT_NOEXCEPT { return format_str_.end(); }
-
-  // Advances the begin iterator to ``it``.
-  FMT_CONSTEXPR void advance_to(iterator it) {
-    format_str_.remove_prefix(internal::to_unsigned(it - begin()));
-  }
-
-  // Returns the next argument index.
-  FMT_CONSTEXPR unsigned next_arg_id();
-
-  FMT_CONSTEXPR bool check_arg_id(unsigned) {
-    if (next_arg_id_ > 0) {
-      on_error("cannot switch from automatic to manual argument indexing");
-      return false;
-    }
-    next_arg_id_ = -1;
-    return true;
-  }
-
-  FMT_CONSTEXPR void check_arg_id(basic_string_view<Char>) {}
-
-  FMT_CONSTEXPR void on_error(const char* message) {
-    ErrorHandler::on_error(message);
-  }
-
-  FMT_CONSTEXPR ErrorHandler error_handler() const { return *this; }
-};
-
-typedef basic_parse_context<char> format_parse_context;
-typedef basic_parse_context<wchar_t> wformat_parse_context;
-
-FMT_DEPRECATED typedef basic_parse_context<char> parse_context;
-FMT_DEPRECATED typedef basic_parse_context<wchar_t> wparse_context;
-
 namespace internal {
 // A map from argument names to their values for named arguments.
 template <typename Context> class arg_map {
@@ -1040,69 +1039,9 @@ class locale_ref {
 
  public:
   locale_ref() : locale_(FMT_NULL) {}
-
   template <typename Locale> explicit locale_ref(const Locale& loc);
 
   template <typename Locale> Locale get() const;
-};
-
-template <typename OutputIt, typename Context, typename Char>
-class context_base {
- public:
-  typedef OutputIt iterator;
-
- private:
-  basic_parse_context<Char> parse_context_;
-  iterator out_;
-  basic_format_args<Context> args_;
-  locale_ref loc_;
-
- protected:
-  typedef Char char_type;
-  typedef basic_format_arg<Context> format_arg;
-
-  context_base(OutputIt out, basic_string_view<char_type> format_str,
-               basic_format_args<Context> ctx_args,
-               locale_ref loc = locale_ref())
-      : parse_context_(format_str), out_(out), args_(ctx_args), loc_(loc) {}
-
-  // Returns the argument with specified index.
-  format_arg do_get_arg(unsigned arg_id) {
-    format_arg arg = args_.get(arg_id);
-    if (!arg) parse_context_.on_error("argument index out of range");
-    return arg;
-  }
-
-  // Checks if manual indexing is used and returns the argument with
-  // specified index.
-  format_arg arg(unsigned arg_id) {
-    return this->parse_context().check_arg_id(arg_id) ? this->do_get_arg(arg_id)
-                                                      : format_arg();
-  }
-
- public:
-  basic_parse_context<char_type>& parse_context() { return parse_context_; }
-
-  // basic_format_context::arg() depends on this
-  // Cannot be marked as deprecated without causing warnings
-  /*FMT_DEPRECATED*/ basic_format_args<Context> args() const { return args_; }
-
-  basic_format_arg<Context> arg(unsigned id) const { return args_.get(id); }
-
-  internal::error_handler error_handler() {
-    return parse_context_.error_handler();
-  }
-
-  void on_error(const char* message) { parse_context_.on_error(message); }
-
-  // Returns an iterator to the beginning of the output range.
-  iterator out() { return out_; }
-  FMT_DEPRECATED iterator begin() { return out_; }
-
-  // Advances the begin iterator to ``it``.
-  void advance_to(iterator it) { out_ = it; }
-
-  locale_ref locale() { return loc_; }
 };
 
 template <typename Context, typename T> struct get_type {
@@ -1129,67 +1068,66 @@ FMT_CONSTEXPR basic_format_arg<Context> make_arg(const T& value) {
 }
 
 template <bool IS_PACKED, typename Context, typename T>
-inline typename std::enable_if<IS_PACKED, value<Context>>::type make_arg(
-    const T& value) {
+inline FMT_ENABLE_IF_T(IS_PACKED, value<Context>) make_arg(const T& value) {
   return make_value<Context>(value);
 }
 
 template <bool IS_PACKED, typename Context, typename T>
-inline typename std::enable_if<!IS_PACKED, basic_format_arg<Context>>::type
-make_arg(const T& value) {
+inline FMT_ENABLE_IF_T(!IS_PACKED, basic_format_arg<Context>)
+    make_arg(const T& value) {
   return make_arg<Context>(value);
 }
 }  // namespace internal
 
 // Formatting context.
-template <typename OutputIt, typename Char>
-class basic_format_context
-    : public internal::context_base<
-          OutputIt, basic_format_context<OutputIt, Char>, Char> {
+template <typename OutputIt, typename Char> class basic_format_context {
  public:
   /** The character type for the output. */
   typedef Char char_type;
+
+ private:
+  OutputIt out_;
+  basic_format_args<basic_format_context> args_;
+  internal::arg_map<basic_format_context> map_;
+  internal::locale_ref loc_;
+
+  basic_format_context(const basic_format_context&) = delete;
+  void operator=(const basic_format_context&) = delete;
+
+ public:
+  typedef OutputIt iterator;
+  typedef basic_format_arg<basic_format_context> format_arg;
 
   // using formatter_type = formatter<T, char_type>;
   template <typename T> struct formatter_type {
     typedef formatter<T, char_type> type;
   };
 
- private:
-  internal::arg_map<basic_format_context> map_;
-
-  basic_format_context(const basic_format_context&) = delete;
-  void operator=(const basic_format_context&) = delete;
-
-  typedef internal::context_base<OutputIt, basic_format_context, Char> base;
-  using base::arg;
-
- public:
-  using typename base::iterator;
-  typedef typename base::format_arg format_arg;
-
   /**
    Constructs a ``basic_format_context`` object. References to the arguments are
    stored in the object so make sure they have appropriate lifetimes.
    */
-  basic_format_context(OutputIt out, basic_string_view<char_type> format_str,
+  basic_format_context(OutputIt out,
                        basic_format_args<basic_format_context> ctx_args,
                        internal::locale_ref loc = internal::locale_ref())
-      : base(out, format_str, ctx_args, loc) {}
+      : out_(out), args_(ctx_args), loc_(loc) {}
 
-  format_arg next_arg() {
-    return this->do_get_arg(this->parse_context().next_arg_id());
-  }
-  format_arg arg(unsigned arg_id) { return this->do_get_arg(arg_id); }
+  format_arg arg(unsigned id) const { return args_.get(id); }
 
   // Checks if manual indexing is used and returns the argument with the
   // specified name.
   format_arg arg(basic_string_view<char_type> name);
 
-  FMT_DEPRECATED format_arg get_arg(unsigned arg_id) { return arg(arg_id); }
-  FMT_DEPRECATED format_arg get_arg(basic_string_view<char_type> name) {
-    return arg(name);
-  }
+  internal::error_handler error_handler() { return {}; }
+  void on_error(const char* message) { error_handler().on_error(message); }
+
+  // Returns an iterator to the beginning of the output range.
+  iterator out() { return out_; }
+
+  // Advances the begin iterator to ``it``.
+  void advance_to(iterator it) { out_ = it; }
+
+  internal::locale_ref locale() { return loc_; }
 };
 
 template <typename Char> struct buffer_context {
@@ -1369,8 +1307,6 @@ struct wformat_args : basic_format_args<wformat_context> {
       : basic_format_args<wformat_context>(std::forward<Args>(arg)...) {}
 };
 
-#define FMT_ENABLE_IF_T(B, T) typename std::enable_if<B, T>::type
-
 #ifndef FMT_USE_ALIAS_TEMPLATES
 #  define FMT_USE_ALIAS_TEMPLATES FMT_HAS_FEATURE(cxx_alias_templates)
 #endif
@@ -1388,6 +1324,13 @@ struct char_t : std::enable_if<internal::is_string<S>::value,
 #endif
 
 namespace internal {
+template <typename Context>
+FMT_CONSTEXPR typename Context::format_arg get_arg(Context& ctx, unsigned id) {
+  auto arg = ctx.arg(id);
+  if (!arg) ctx.on_error("argument index out of range");
+  return arg;
+}
+
 template <typename Char> struct named_arg_base {
   basic_string_view<Char> name;
 
@@ -1412,24 +1355,18 @@ template <typename T, typename Char> struct named_arg : named_arg_base<Char> {
 };
 
 template <typename... Args, typename S>
-inline typename std::enable_if<!is_compile_string<S>::value>::type
-check_format_string(const S&) {}
+inline FMT_ENABLE_IF_T(!is_compile_string<S>::value)
+    check_format_string(const S&) {}
 template <typename... Args, typename S>
-typename std::enable_if<is_compile_string<S>::value>::type check_format_string(
-    S);
+FMT_ENABLE_IF_T(is_compile_string<S>::value)
+check_format_string(S);
 
 template <typename S, typename... Args>
-struct checked_args
-    : format_arg_store<typename buffer_context<FMT_CHAR(S)>::type, Args...> {
-  typedef typename buffer_context<FMT_CHAR(S)>::type context;
-
-  checked_args(const S& format_str, const Args&... args)
-      : format_arg_store<context, Args...>(args...) {
-    internal::check_format_string<Args...>(format_str);
-  }
-
-  basic_format_args<context> operator*() const { return *this; }
-};
+inline format_arg_store<typename buffer_context<FMT_CHAR(S)>::type, Args...>
+make_args_checked(const S& format_str, const Args&... args) {
+  internal::check_format_string<Args...>(format_str);
+  return {args...};
+}
 
 template <typename Char>
 std::basic_string<Char> vformat(
@@ -1451,13 +1388,8 @@ typename buffer_context<Char>::type::iterator vformat_to(
     fmt::print("Elapsed time: {s:.2f} seconds", fmt::arg("s", 1.23));
   \endrst
  */
-template <typename T>
-inline internal::named_arg<T, char> arg(string_view name, const T& arg) {
-  return {name, arg};
-}
-
-template <typename T>
-inline internal::named_arg<T, wchar_t> arg(wstring_view name, const T& arg) {
+template <typename S, typename T>
+inline internal::named_arg<T, FMT_CHAR(S)> arg(const S& name, const T& arg) {
   return {name, arg};
 }
 
@@ -1475,8 +1407,8 @@ struct is_contiguous<internal::basic_buffer<Char>> : std::true_type {};
 
 /** Formats a string and writes the output to ``out``. */
 template <typename Container, typename S>
-typename std::enable_if<is_contiguous<Container>::value,
-                        std::back_insert_iterator<Container>>::type
+FMT_ENABLE_IF_T(is_contiguous<Container>::value,
+                std::back_insert_iterator<Container>)
 vformat_to(std::back_insert_iterator<Container> out, const S& format_str,
            basic_format_args<typename buffer_context<FMT_CHAR(S)>::type> args) {
   internal::container_buffer<Container> buf(internal::get_container(out));
@@ -1485,13 +1417,13 @@ vformat_to(std::back_insert_iterator<Container> out, const S& format_str,
 }
 
 template <typename Container, typename S, typename... Args>
-inline typename std::enable_if<is_contiguous<Container>::value &&
-                                   internal::is_string<S>::value,
-                               std::back_insert_iterator<Container>>::type
-format_to(std::back_insert_iterator<Container> out, const S& format_str,
-          const Args&... args) {
-  internal::checked_args<S, Args...> ca(format_str, args...);
-  return vformat_to(out, to_string_view(format_str), *ca);
+inline FMT_ENABLE_IF_T(
+    is_contiguous<Container>::value&& internal::is_string<S>::value,
+    std::back_insert_iterator<Container>)
+    format_to(std::back_insert_iterator<Container> out, const S& format_str,
+              const Args&... args) {
+  return vformat_to(out, to_string_view(format_str),
+                    {internal::make_args_checked(format_str, args...)});
 }
 
 template <typename S, typename Char = FMT_CHAR(S)>
@@ -1514,9 +1446,8 @@ inline std::basic_string<Char> vformat(
 template <typename S, typename... Args>
 inline std::basic_string<FMT_CHAR(S)> format(const S& format_str,
                                              const Args&... args) {
-  return internal::vformat(
-      to_string_view(format_str),
-      *internal::checked_args<S, Args...>(format_str, args...));
+  return internal::vformat(to_string_view(format_str),
+                           {internal::make_args_checked(format_str, args...)});
 }
 
 FMT_API void vprint(std::FILE* f, string_view format_str, format_args args);
@@ -1537,7 +1468,7 @@ template <typename S, typename... Args>
 inline FMT_ENABLE_IF_T(internal::is_string<S>::value, void)
     print(std::FILE* f, const S& format_str, const Args&... args) {
   vprint(f, to_string_view(format_str),
-         internal::checked_args<S, Args...>(format_str, args...));
+         internal::make_args_checked(format_str, args...));
 }
 
 FMT_API void vprint(string_view format_str, format_args args);
@@ -1556,7 +1487,7 @@ template <typename S, typename... Args>
 inline FMT_ENABLE_IF_T(internal::is_string<S>::value, void)
     print(const S& format_str, const Args&... args) {
   vprint(to_string_view(format_str),
-         internal::checked_args<S, Args...>(format_str, args...));
+         internal::make_args_checked(format_str, args...));
 }
 FMT_END_NAMESPACE
 
